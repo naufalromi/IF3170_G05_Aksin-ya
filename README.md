@@ -1,0 +1,1 @@
+Is it better to speak or to die
