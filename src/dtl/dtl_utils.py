@@ -281,7 +281,18 @@ def gain_ratio_numeric_fast(data: pd.DataFrame, attribute:str, weights : np.ndar
     return ratio, gain, thresholds[selected]
 
 
-def search_best_attribute(data : pd.DataFrame, weights : np.array) -> tuple[str, tuple[float, float, float]]:
+def search_best_attribute(data : pd.DataFrame, weights : np.array) -> tuple[str, tuple]:
+    """Mencari Attribut terbaik
+
+    Args:
+        data (pd.DataFrame): Data Sekarang
+        weights (np.array): bobot
+
+    Returns:
+        tuple[str, tuple]: 
+            nama_atribut, dan tuplenya (gain ratio, gain, split information); untuk data kategorik
+            nama_atribut, dan tuplenya (gain ratio, gain, threshold); untuk data numerik
+    """
     
     weights = _validate_weights(data, weights)
     

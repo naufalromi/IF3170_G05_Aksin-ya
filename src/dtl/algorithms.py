@@ -7,7 +7,8 @@ from.dtl_utils import (
     EPSILON,
     MINIMUM_INSTANCES,
     estimate_error,
-    search_best_attribute
+    search_best_attribute,
+    _validate_weights
 )
 
 def branch_mask(column : pd.Series, operator : int, condition) -> pd.Series:
@@ -196,11 +197,11 @@ class Node:
         """jumlah error di tarining. Internal node = Jumlah error anak"""
         
         if self.is_leaf():
-            return self._error()
+            return self._error
         else:
             e = 0
             for node in self.children:
-                e += node._error
+                e += node.error()
             return e
     
     def estimated(self, confidence_factor : float):
@@ -272,7 +273,7 @@ class Node:
             branch_data = branch_data.reset_index(drop = True)
             
             total += self.children[i].estimate_with_data(
-                metadata, branch_data, updated_weights, update, confidance_factor
+                metadata, branch_data, updated_weights, update, confidence_factor
             )
         return total
 
@@ -287,3 +288,154 @@ class Node:
         for child in self.children:
             child.sort()
 
+
+# bagian bikin pohon + pruning
+
+def class_distribution(metadata : dict, data : pd.DataFrame, weights : np.ndarray) -> Counter:
+    """Total bobot setiap kelas: {kelas : bobot}"""
+    
+    class_attribute = data.iloc[:, -1]
+    distribution = Counter()
+    for value in metadata[data.columns[-1]]:
+        distribution[value] = weights[class_attribute == value].sum()
+    return distribution
+
+def calculate_majority(class_attribute : pd.Series, weights : np.ndarray):
+    """Kelas dengan bobot terbesar. Jika seri ambil yang pertama muncul"""
+    majority = None
+    best = 0
+    
+    # implmenetasi asli pemilihan kalau sama di random tapi well jadi deterministik
+    for value in class_attribute.unique():
+        count = weights[class_attribute == value].sum()
+        if count > best:
+            majority = value
+            best = count
+    
+    return majority
+
+def make_leaf(metadata : dict, data : pd.DataFrame, weights : np.ndarray, majority, parent : Node) -> Node:
+    """Membuat leaf yang memprediksi 'majority' """
+    
+    distribution = class_distribution(metadata, data, weights)
+    total = weights.sum()
+    error = total - distribution[majority] if total > 0 else 0
+    return Node(majority, parent, error, total, distribution)
+
+def pre_prune(metadata : dict, data:pd.DataFrame, majority, node:Node, weights:np.ndarray) -> Node:
+    """Jika subtree tidak lebih dari leaf (error training), ganti dengan leaf"""
+    length = weights.sum()
+    if length > 0:
+        majority = calculate_majority(data.iloc[:,-1], weights)
+    
+    leaf = make_leaf(metadata, data,weights, majority, node.parent)
+    
+    if node.error() >= leaf.error() - EPSILON:
+        return leaf
+    
+    return node
+
+def post_prune(metadata : dict, data : pd.DataFrame, node:Node, majority, weights : np.ndarray, confidence_factor : float = 0.25) -> Node:
+    """Pessimistic error pruning C4.5. Membandingkan 3 pilihan
+        1. subtree apa adanya
+        2. diganti dengan leaf
+        3. diganti dengan cabang terbesar
+    """
+    
+    # 1. error subtree
+    subtree_error = node.estimated(confidence_factor)
+    
+    # 2.  error jika jadi leaf
+    leaf = make_leaf(metadata, data, weights, majority, node.parent)
+    leaf_error = leaf.error() + estimate_error(leaf.total(),  leaf.error(), confidence_factor)
+    
+    # 3. error jika diganti cabang dengan data terbanyak
+    selected : Node = max(node.children, key=lambda child:child.total())
+    
+    if selected.is_leaf():
+        branch_error = leaf_error
+    else:
+        branch_error = selected.estimate_with_data(
+            metadata, data,weights,confidence_factor=confidence_factor
+        )
+    
+    if leaf_error <= subtree_error + 0.1 and leaf_error <= branch_error + 0.1:
+        return leaf
+    if branch_error <= subtree_error + 0.1:
+        selected.estimate_with_data(metadata,data,weights,True,confidence_factor)
+        selected.parent = node.parent
+        return selected
+    return node
+
+def build_decision_tree(metadata : dict, data : pd.DataFrame, tree : Node = None, parent_majority= None, weights : np.ndarray = None, prune : bool = True, confidence_factor :float = 0.25 ) -> Node:
+    """Membangung pohon C4.5 secara rekursif. kolom terakhir adalah data adalah kelas"""
+    
+    weights = _validate_weights(data, weights)
+    
+    class_attribute = data.iloc[:,-1]
+    length = weights.sum()
+    majority = parent_majority if length == 0 else calculate_majority(class_attribute, weights)
+    
+    # kasus basis : kelas sudah murni atau data terlalu sedikit
+    if class_attribute.nunique() <= 1 or length < MINIMUM_INSTANCES * 2:
+        return make_leaf(metadata, data, weights, majority, tree)
+    
+    attribute, info = search_best_attribute(data,weights)
+    
+    # kasus basis : tidak ada attribut yang memberi gain
+    if attribute is None:
+        return make_leaf(metadata, data, weights, majority,tree)
+    
+    column = data[attribute]
+    missing = column.isna()
+    known_weight = length - weights[missing].sum()
+    numeric = is_numeric_dtype(column)
+    
+    if numeric :
+        branches = [(Operator.LESS_OR_EQUAL,info[2]),(Operator.GREATER, info[2])]
+    else:
+        branches =[(Operator.EQUAL, value) for value in metadata[attribute]]
+    
+    # bobot setiap cabang (data missing dibagi proposional ke semua cabang)
+    branch_weights = []
+    for operator, condition in branches:
+        count = weights[branch_mask(column,operator,condition)].sum()
+        adjusted = count + weights[missing].sum() * (count/known_weight)
+        branch_weights.append((count, adjusted))
+    
+    # minimal 2 cahan gharus punya data yang cukup, jika tidak attribut lain
+    valid = sum(1 for _, adjusted in branch_weights if adjusted >= MINIMUM_INSTANCES)
+    if valid < 2:
+        return build_decision_tree(metadata, data.drop(columns=attribute), tree, parent_majority, weights,prune, confidence_factor)
+    node = Node(attribute, parent=tree)
+    
+    for (operator, condition), (count, _) in zip(branches, branch_weights):
+        partition = branch_mask(column,operator,condition)
+        updated_weights = weights.copy()
+        updated_weights[missing] = updated_weights[missing] * (count/known_weight)
+        
+        updated_weights = updated_weights[partition | missing]
+        branch_data = data[partition | missing]
+        if not numeric:
+            # atribut kategorikal tidak dipakai lagi di bawahnya
+            branch_data = branch_data.drop(columns = attribute)
+        
+        branch_data = branch_data.reset_index(drop = True)
+        
+        child = build_decision_tree(metadata, branch_data, node, majority,updated_weights,prune,confidence_factor)
+        
+        node.add(pre_prune(metadata,branch_data,majority,child,updated_weights),condition,operator)
+        
+    if prune:
+        node = post_prune(metadata, data, node, majority, weights, confidence_factor)
+    
+    if tree is None:
+        node.adjust(data)
+        node.sort()
+        node.classes = metadata[data.columns[-1]]
+    
+    return node
+        
+    
+        
+    
