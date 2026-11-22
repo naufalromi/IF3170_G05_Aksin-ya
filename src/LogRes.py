@@ -4,10 +4,10 @@ class LogRes:
     def __init__(
         self,
         learn_rate: float = 0.0,
-        iterations: int = 0,
+        iterations: int = 100,
         penalty: {'l1', 'l2', 'elastic', None} = None,
-        C: float = 0.0,
-        l1_ratio: float = 0.0,
+        C: float = 1.0,
+        l1_ratio: float = 0.01,
         tolerance: float = 1e-4,
         fit_intercept: bool = True,
         shuffle: bool = True,
@@ -36,20 +36,24 @@ class LogRes:
         self.classes = np.unique(y)
         if len(self.classes) != 2:
             raise ValueError("This implementation only supports binary classification.")
+        y_encoded = (y == self.classes[1]).astype(float)
         self.weights = self._initialize_weights(n_features)
         self.bias = 0.0
         self.log_likelihood_records = []
+        self.iter_result = 0
+        self._rng = np.random.default_rng(seed = self.random_seed)
         for i in range(self.iterations):
             if self.shuffle:
-                X, y = self._shuffle_data(X, y)
+                X, y_encoded = self._shuffle_data(X, y)
             for idx in range(n_samples):
                 x_i = X[idx]
                 y_i = y[idx]
                 grad_weights, grad_bias = self._compute_sample_gradient(x_i, y_i)
                 penalty_grad = self._penalty_gradient(self.weights)
                 self.weights += self.learn_rate * (grad_weights - penalty_grad)
-                self.bias += self.learn_rate * grad_bias
-            log_likelihood = self._compute_log_likelihood(X, y)
+                if self.fit_intercept:
+                    self.bias += self.learn_rate * grad_bias
+            log_likelihood = self._compute_log_likelihood(X, y_encoded)
             self.log_likelihood_records.append(log_likelihood)
             if self.verbose:
                 print(f"Iteration {i + 1}/{self.iterations}, Log-Likelihood: {log_likelihood:.4f}")
@@ -57,7 +61,7 @@ class LogRes:
                 if self.verbose:
                     print(f"Convergence reached at iteration {i + 1}.")
                 break
-        self.iter_result = i + 1
+            self.iter_result = i + 1
         return self
 
     def predict_prob(self, X: np.ndarray) -> np.ndarray:
@@ -68,9 +72,7 @@ class LogRes:
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         probs = self.predict_prob(X)
-        result = np.zeros(probs.shape)
-        if probs > 0.5:
-            result = np.ones(probs.shape)
+        result = (probs > 0.5).astype(int)
         return self.classes[result.astype(int)]
 
     def score(self, X: np.ndarray, y: np.ndarray) -> float:
@@ -80,12 +82,11 @@ class LogRes:
     def _initialize_weights(self, n_features: int) -> np.ndarray:
         if self.random_seed is not None:
             rng = np.random.default_rng(seed = self.random_seed)
-            return rng.random(n_features)
+            return rng.random(n_features) * 0.01
         return np.zeros(n_features)
 
     def _shuffle_data(self, X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        rng = np.random.default_rng(seed = self.random_seed)
-        idx = rng.permutation(X.shape[0])
+        idx = self._rng.permutation(X.shape[0])
         return X[idx], y[idx]
 
     def _sigmoid(self, z: float) -> float:
@@ -110,7 +111,7 @@ class LogRes:
         return np.zeros_like(weights)
 
     def _compute_log_likelihood(self, X: np.ndarray, y: np.ndarray) -> float:
-        predictions = predict_prob(X)
+        predictions = self.predict_prob(X)
         loglike = np.sum(y * np.log(predictions) + (1 - y) * np.log(1 - predictions))
         loglike -= self._penalty_term(self.weights)
         return loglike
