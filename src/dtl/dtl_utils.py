@@ -9,7 +9,6 @@ import pandas as pd
 from scipy.stats import norm
 import random
 
-from collections import Counter
 from json import load
 from pandas.api.types import is_numeric_dtype
 
@@ -58,7 +57,7 @@ def gain_ratio(data : pd.DataFrame, attribute : str, weights : np.array | None =
     """
     
     # inisialisasi weight dengan 1 jika tidak ada parameter
-    weights = _validate_weights(weights, )
+    weights = _validate_weights(data, weights)
     
     # nilai kelas yang ada di Data
     target_column = data.iloc[:, - 1]
@@ -69,6 +68,9 @@ def gain_ratio(data : pd.DataFrame, attribute : str, weights : np.array | None =
     missing_weight = weights[is_missing_mask].sum()
     
     valid_weight = total_weight - missing_weight
+    
+    if valid_weight <= 0:
+        return 0,0,0
     
     unique_classes = target_column[is_valid_mask].unique()
     
@@ -83,7 +85,7 @@ def gain_ratio(data : pd.DataFrame, attribute : str, weights : np.array | None =
             total_class_entropy -= class_probability * np.log2(class_probability)
         
     # Menghitung Partition Entropy & Split Information
-    unique_attribute_values = data.iloc(is_valid_mask, attribute).unique()
+    unique_attribute_values = data.loc[is_valid_mask, attribute].unique()
     weighted_partition_entropy = 0
     split_information = 0.0
     
@@ -93,7 +95,7 @@ def gain_ratio(data : pd.DataFrame, attribute : str, weights : np.array | None =
         partition_entropy = 0.0
         
         for target_class in unique_classes:
-            class_in_partition_mask   = (target_class == target_class) & partition_mask
+            class_in_partition_mask   = (target_column == target_class) & partition_mask
             class_in_partition_weight = weights[class_in_partition_mask].sum()
             
             if class_in_partition_weight > 0:
@@ -123,7 +125,7 @@ def find_candidate_thresholds(data : pd.DataFrame, attribute : str,weights : np.
     """
         Generasi kandidate nilai untuk attribut data kontigu
     """
-    weights = _validate_weights(weights, data)
+    weights = _validate_weights(data, weights)
     is_valid_mask = data[attribute].notna()
     valid_weights = weights[is_valid_mask]
     sorted_value_weight_pairs = sorted(
@@ -206,7 +208,78 @@ def gain_ratio_numeric(data : pd.DataFrame, attribute:str, weights:np.array) -> 
     selected = np.argmax(thresholds_gain)
     
     
-    return gain_information[selected][0], gain_information[selected][1],thresholds_gain[selected]
+    return gain_information[selected][0], gain_information[selected][1],thresholds[selected]
+
+def _entropy_rows(class_weights : np.ndarray) -> np.ndarray:
+    """Entropi tiap baris dari matriks bobot kelas (baris = partisi, kolom = kelas)"""
+    totals = class_weights.sum(axis=1, keepdims=True)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        p = np.where(totals > 0, class_weights / totals, 0.0)
+        terms = np.where(p > 0, p * np.log2(p), 0.0)
+    return -terms.sum(axis = 1)
+
+def gain_ratio_numeric_fast(data: pd.DataFrame, attribute:str, weights : np.ndarray | None = None) -> tuple(float, float, float):
+    """Versi vektor dari gain_ratio_numeric yang lebih cepat
+    
+    Semua threshold dievaluasi sekaligus memakai cumulative sum bobot per kelas,
+    bukan memanggil gain_ratio satu per satu.
+
+    """
+    
+    weights = _validate_weights(data, weights)
+    is_valid_mask = data[attribute].notna().to_numpy()
+    
+    values = data[attribute].to_numpy(dtype=float)[is_valid_mask]
+    valid_weights = weights[is_valid_mask]
+    targets = data.iloc[:, - 1].to_numpy()[is_valid_mask]
+    
+    if len(values) < MINIMUM_INSTANCES:
+        return 0, 0 , 0
+    
+    order = np.argsort(values, kind="stable")
+    values, valid_weights, targets = values[order], valid_weights[order], targets[order]
+    
+    classes, class_index = np.unique(targets, return_inverse=True)
+    
+    # one_hot(i, k) = bobot bars i jika kelas k
+    one_hot = np.zeros((len(values), len(classes)))
+    one_hot[np.arange(len(values)), class_index] = valid_weights
+    
+    # left[i] = bobot perkelas untuk semua data dengan posisi <= i
+    left = np.cumsum(one_hot,axis=0)[:-1]
+    known_weight = valid_weights.sum()
+    right = one_hot.sum(axis=0) - left
+    left_weight = left.sum(axis=1)
+    right_weight = known_weight - left_weight
+    
+    min_split = np.clip(0.1 * known_weight / len(classes), MINIMUM_INSTANCES, INTERVAL_LIMIT)
+    candidate = (
+        (values[:-1] + DELTA < values[1:])
+        & (left_weight + CORRECTION >= min_split)
+        & (right_weight + CORRECTION >= min_split)
+    )
+    
+    if not candidate.any():
+        return 0,0,0
+    
+    left, right = left[candidate], right[candidate]
+    left_weight, right_weight = left_weight[candidate], right_weight[candidate]
+    thresholds = (values[:-1][candidate] + values[1:][candidate])/2
+    
+    total_entropy = _entropy_rows(one_hot.sum(axis=0, keepdims=True))[0]
+    partition_entropy = (left_weight * _entropy_rows(left) + right_weight * _entropy_rows(right)) / known_weight
+    p_left, p_right = left_weight/known_weight, right_weight/known_weight
+    split = -(p_left * np.log2(p_left) + p_right * np.log2(p_right))
+    
+    gain_correction = known_weight / weights.sum()
+    penalty = np.log2(len(thresholds)) / weights.sum()
+    gains = gain_correction * (total_entropy - partition_entropy) - penalty
+    
+    selected = np.argmax(gains)
+    gain = gains[selected]
+    ratio = 0 if gain == 0 or split[selected] == 0 else gain/split[selected]
+    return ratio, gain, thresholds[selected]
+
 
 def search_best_attribute(data : pd.DataFrame, weights : np.array) -> tuple[str, tuple[float, float, float]]:
     
@@ -221,7 +294,7 @@ def search_best_attribute(data : pd.DataFrame, weights : np.array) -> tuple[str,
     
     for attribute in predictors.columns:
         if is_numeric_dtype(data[attribute]):
-            c = attribute, gain_ratio_numeric(data,attribute, weights)
+            c = attribute, gain_ratio_numeric_fast(data,attribute, weights)
         else:
             c = attribute, gain_ratio(data,attribute, weights)
 
@@ -285,7 +358,7 @@ def estimate_error(total : float, errors: float, confidence_factor :float = 0.25
         return 0.67 * (total - errors)
     
     z_sq = compute_z_squared(confidence_factor)
-    adjusted_errors = errors * 0.5
+    adjusted_errors = errors + 0.5
     
     numerator = (
         adjusted_errors
