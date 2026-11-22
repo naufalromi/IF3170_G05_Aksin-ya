@@ -32,16 +32,50 @@ class LogRes:
         self.iter_result: int = 0
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> LogRes:
-        return NotImplemented
+        n_samples, n_features = X.shape
+        self.classes = np.unique(y)
+        if len(self.classes) != 2:
+            raise ValueError("This implementation only supports binary classification.")
+        self.weights = self._initialize_weights(n_features)
+        self.bias = 0.0
+        self.log_likelihood_records = []
+        for i in range(self.iterations):
+            if self.shuffle:
+                X, y = self._shuffle_data(X, y)
+            for idx in range(n_samples):
+                x_i = X[idx]
+                y_i = y[idx]
+                grad_weights, grad_bias = self._compute_sample_gradient(x_i, y_i)
+                penalty_grad = self._penalty_gradient(self.weights)
+                self.weights += self.learn_rate * (grad_weights - penalty_grad)
+                self.bias += self.learn_rate * grad_bias
+            log_likelihood = self._compute_log_likelihood(X, y)
+            self.log_likelihood_records.append(log_likelihood)
+            if self.verbose:
+                print(f"Iteration {i + 1}/{self.iterations}, Log-Likelihood: {log_likelihood:.4f}")
+            if i > 0 and np.abs(log_likelihood - self.log_likelihood_records[-2]) < self.tolerance:
+                if self.verbose:
+                    print(f"Convergence reached at iteration {i + 1}.")
+                break
+        self.iter_result = i + 1
+        return self
 
     def predict_prob(self, X: np.ndarray) -> np.ndarray:
-        return NotImplemented
+        if self.weights is None or self.bias is None:
+            raise ValueError("Model has not been fitted yet.")
+        z = np.dot(X, self.weights) + self.bias
+        return self._sigmoid(z)
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        return NotImplemented
+        probs = self.predict_prob(X)
+        result = np.zeros(probs.shape)
+        if probs > 0.5:
+            result = np.ones(probs.shape)
+        return self.classes[result.astype(int)]
 
     def score(self, X: np.ndarray, y: np.ndarray) -> float:
-        return NotImplemented
+        predictions = self.predict(X)
+        return np.mean(predictions == y)
 
     def _initialize_weights(self, n_features: int) -> np.ndarray:
         if self.random_seed is not None:
