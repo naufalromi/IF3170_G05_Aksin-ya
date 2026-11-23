@@ -42,6 +42,8 @@ class LogRes:
         self.iter_result: int = 0
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> LogRes:
+        X = np.asarray(X, dtype=float)
+        y = np.asarray(y)
         n_samples, n_features = X.shape
         self.classes = np.unique(y)
         if len(self.classes) != 2:
