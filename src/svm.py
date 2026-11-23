@@ -40,6 +40,17 @@ class svm:
         np.exp(K, out=K)
         return K
 
+    def approximate_kernel(self, X: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        n: int = X.shape[0]
+        m: int = min(n, 200)
+        idx: np.ndarray = np.random.default_rng(42).choice(n, size=m, replace=False)
+        X_m: np.ndarray = X[idx]
+        eigvals, eigvecs = np.linalg.eigh(self.compute_kernel(X_m, X_m)) #K_mm = V * Lambda * V^T
+        mask: np.ndarray = eigvals > 1e-8
+        basis: np.ndarray = eigvecs[:, mask] / np.sqrt(eigvals[mask]) #K_mm^(-1/2)
+        Phi: np.ndarray = self.compute_kernel(X, X_m) @ basis #phi(X) = K_nm * K_mm^(-1/2), matriks fitur di ruang kernel (K ≈ Phi * Phi^T)
+        return Phi, basis, X_m
+
     def fit(self, X: np.ndarray, y: np.ndarray) -> svm:
         X = np.asarray(X, dtype=float)
         y = np.asarray(y)
@@ -50,30 +61,28 @@ class svm:
         alpha_var = cp.Variable(n)
 
         if self.kernel == "linear":
-            Z: np.ndarray = X * y_bin[:, None]
-            w_var = cp.Variable(X.shape[1])
-            prob = cp.Problem(
-                cp.Minimize(0.5 * cp.sum_squares(w_var) + 0.5e-8 * cp.sum_squares(alpha_var) + q @ alpha_var),
-                [w_var == Z.T @ alpha_var, alpha_var >= 0.0, y_bin @ alpha_var == 0.0], #constraint
-            )
+            Phi: np.ndarray = X #phi(X) = X, pemetaan fitur ruang kernel (<phi(xi), phi(xj)> = K(xi, xj))
         else:
-            P: np.ndarray = self.compute_kernel(X, X)
-            P *= y_bin[:, None]
-            P *= y_bin[None, :] #yiyjK(Xi,Xj)
-            P.flat[:: n + 1] += 1e-8
-            prob = cp.Problem(
-                cp.Minimize(0.5 * cp.quad_form(alpha_var, P, assume_PSD=True) + q @ alpha_var), #sum(aPa)-sum(a) alias sum(aiyiyjK(xi,xj)aj)-sum(a)
-                [alpha_var >= 0.0, y_bin @ alpha_var == 0.0], #constraint
-            )
-        prob.solve()
+            Phi, basis, X_m = self.approximate_kernel(X) #phi(X) hasil aproksimasi Nystrom
+
+        Z: np.ndarray = Phi * y_bin[:, None] #yi * phi(Xi)
+        prob = cp.Problem(
+            cp.Minimize(0.5 * cp.sum_squares(Z.T @ alpha_var) + 0.5 * cp.sum_squares(alpha_var) + q @ alpha_var), #sum(aPa)-sum(a) alias sum(aiyiyjK(xi,xj)aj)-sum(a)
+            [alpha_var >= 0.0, y_bin @ alpha_var == 0.0], #constraint
+        )
+        prob.solve(solver=cp.OSQP)
 
         alpha: np.ndarray = np.asarray(alpha_var.value, dtype=float)
         sv: np.ndarray = alpha > self.tol
 
-        self.coef: np.ndarray = alpha[sv] * y_bin[sv] #ai*yi
-        self.support_vectors: np.ndarray = X[sv]
+        if self.kernel == "linear":
+            self.coef: np.ndarray = alpha[sv] * y_bin[sv] #ai*yi
+            self.support_vectors: np.ndarray = X[sv]
+        else:
+            self.coef = ((alpha[sv] * y_bin[sv]) @ Phi[sv]) @ basis.T #ai*yi*phi(Xi)*K_mm^(-1/2)^T
+            self.support_vectors = X_m
         self.b: float = (
-            float(y_bin[sv][0] - self.coef @ self.compute_kernel(self.support_vectors, self.support_vectors[:1]).ravel())
+            float(y_bin[sv][0] * (1.0 - alpha[sv][0]) - self.coef @ self.compute_kernel(self.support_vectors, X[sv][:1]).ravel()) #yk(1-ak) - sum(ai*yi*K(xi,xk))
             if np.any(sv)
             else 0.0
         )
