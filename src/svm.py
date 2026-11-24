@@ -1,4 +1,6 @@
 from __future__ import annotations
+import json
+from pathlib import Path
 import cvxpy as cp
 import numpy as np
 
@@ -96,3 +98,37 @@ class svm:
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         return np.where(self.discriminant_function(X) >= 0, self.classes[1], self.classes[0])
+
+    def save(self, path: str | Path) -> None:
+        file_path = Path(path)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "kernel": self.kernel,
+            "degree": self.degree,
+            "gamma": self.gamma,
+            "coef0": self.coef0,
+            "tol": self.tol,
+            "classes": self.classes.tolist(),
+            "coef": self.coef.tolist(),
+            "support_vectors": self.support_vectors.tolist(),
+            "b": self.b,
+        }
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+
+    @classmethod
+    def load(cls, path: str | Path) -> svm:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        model = cls(
+            kernel=data["kernel"],
+            degree=data["degree"],
+            gamma=data["gamma"],
+            coef0=data["coef0"],
+            tol=data["tol"],
+        )
+        model.classes = np.asarray(data["classes"])
+        model.coef = np.asarray(data["coef"], dtype=float)
+        model.support_vectors = np.asarray(data["support_vectors"], dtype=float)
+        model.b = float(data["b"])
+        return model
