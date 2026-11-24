@@ -1,9 +1,10 @@
 import numpy as np
 
 class NaiveBayes:
-    def __init__(self, numeric_cols, categorical_cols, alpha=1.0, var_smoothing=1e-9):
+    def __init__(self, numeric_cols, categorical_cols, binary_cols=None, alpha=1.0, var_smoothing=1e-9):
         self.numeric_cols = numeric_cols
         self.categorical_cols = categorical_cols
+        self.binary_cols = [] if binary_cols is None else list(binary_cols)
         self.alpha = alpha
         self.var_smoothing = var_smoothing
 
@@ -15,7 +16,8 @@ class NaiveBayes:
         y = np.asarray(y)
         numeric_cols = list(numeric_cols)
         categorical_cols = list(categorical_cols)
-        columns = numeric_cols + categorical_cols
+        binary_cols = list(self.binary_cols)
+        columns = numeric_cols + categorical_cols + binary_cols
 
         if y.ndim != 1 or len(X) == 0 or len(X) != len(y):
             raise ValueError("X and y must have the same nonzero number of rows; y must be one-dimensional.")
@@ -32,6 +34,14 @@ class NaiveBayes:
         numeric = X[numeric_cols].to_numpy(dtype=float)
         if not np.isfinite(numeric).all():
             raise ValueError("Numeric features must contain finite numbers.")
+
+        binary = X[binary_cols].to_numpy(dtype=float)
+        if not np.isin(binary, [0, 1]).all():
+            raise ValueError("Binary features must contain only 0 or 1.")
+        binary_probabilities = []
+        for label, count in zip(classes, class_counts):
+            ones = binary[y == label].sum(axis=0)
+            binary_probabilities.append((ones + alpha) / (count + 2 * alpha))
 
         epsilon = np.maximum(var_smoothing * numeric.var(axis=0), 1e-12)
         means = []
@@ -59,6 +69,9 @@ class NaiveBayes:
                 category_log_probs[col].append(probs)
                 unknown_log_probs[col].append(np.log(alpha / denominator))
 
+        self.binary_cols_ = binary_cols
+        self.binary_log_prob_ = np.log(np.asarray(binary_probabilities))
+        self.binary_log_complement_ = np.log1p(-np.asarray(binary_probabilities))
         self.classes_ = classes
         self.numeric_cols_ = numeric_cols
         self.categorical_cols_ = categorical_cols
@@ -72,12 +85,16 @@ class NaiveBayes:
     def _joint_log_scores(self, X):
         if not hasattr(self, "classes_"):
             raise ValueError("Call fit before prediction.")
-        columns = self.numeric_cols_ + self.categorical_cols_
+        columns = self.numeric_cols_ + self.categorical_cols_ + self.binary_cols_
         if X[columns].isna().any().any():
             raise ValueError("Handle missing values before prediction.")
         numeric = X[self.numeric_cols_].to_numpy(dtype=float)
         if not np.isfinite(numeric).all():
             raise ValueError("Numeric features must contain finite numbers.")
+
+        binary = X[self.binary_cols_].to_numpy(dtype=float)
+        if not np.isin(binary, [0, 1]).all():
+            raise ValueError("Binary features must contain only 0 or 1.")
 
         scores = np.tile(self.class_log_prior_, (len(X), 1))
         for i in range(len(self.classes_)):
@@ -85,6 +102,10 @@ class NaiveBayes:
             variance = self.numeric_variance_[i]
             gaussian = -0.5 * (np.log(2 * np.pi * variance) + (numeric - mean) ** 2 / variance)
             scores[:, i] += gaussian.sum(axis=1)
+            scores[:, i] += (
+                binary * self.binary_log_prob_[i]
+                + (1 - binary) * self.binary_log_complement_[i]
+            ).sum(axis=1)
 
             for col in self.categorical_cols_:
                 probs = self.category_log_probs_[col][i]
